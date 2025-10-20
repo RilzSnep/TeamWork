@@ -1,6 +1,8 @@
 package com.example.demo.service;
 
 import com.example.demo.entity.User;
+import com.example.demo.exception.CustomException;
+import com.example.demo.exception.UserNotFoundException;
 import com.example.demo.repository.UserRepository;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -32,14 +34,20 @@ public class UserService {
      * @return сохраненный объект пользователя
      */
     public User saveUser(User user) {
-        log.info("Сохранение пользователя с chatId: {}", user.getChatId());
+        try {
+            log.info("Сохранение пользователя с chatId: {}", user.getChatId());
 
-        // Если пользователь новый, устанавливаем дату регистрации
-        if (user.getRegisteredAt() == null) {
-            user.setRegisteredAt(LocalDateTime.now());
+            if (user.getRegisteredAt() == null) {
+                user.setRegisteredAt(LocalDateTime.now());
+            }
+
+            User savedUser = userRepository.save(user);
+            log.info("Пользователь успешно сохранен: {}", savedUser.getChatId());
+            return savedUser;
+        } catch (Exception e) {
+            log.error("Ошибка при сохранении пользователя {}: {}", user.getChatId(), e.getMessage());
+            throw new CustomException("Не удалось сохранить пользователя", e);
         }
-
-        return userRepository.save(user);
     }
 
     /**
@@ -49,8 +57,13 @@ public class UserService {
      * @return {@link Optional}, содержащий пользователя, если он найден, иначе пустой {@link Optional}
      */
     public Optional<User> findByChatId(Long chatId) {
-        log.debug("Поиск пользователя по chatId: {}", chatId);
-        return userRepository.findById(chatId);
+        try {
+            log.debug("Поиск пользователя по chatId: {}", chatId);
+            return userRepository.findById(chatId);
+        } catch (Exception e) {
+            log.error("Ошибка при поиске пользователя {}: {}", chatId, e.getMessage());
+            throw new CustomException("Не удалось найти пользователя", e);
+        }
     }
 
     /**
@@ -63,16 +76,21 @@ public class UserService {
      * @return новый объект пользователя
      */
     public User createNewUser(Long chatId, String firstName, String lastName, String userName) {
-        log.info("Создание нового пользователя: {}", userName);
+        try {
+            log.info("Создание нового пользователя: {}", userName);
 
-        User user = new User();
-        user.setChatId(chatId);
-        user.setFirstName(firstName);
-        user.setLastName(lastName);
-        user.setUserName(userName);
-        user.setRegisteredAt(LocalDateTime.now());
+            User user = new User();
+            user.setChatId(chatId);
+            user.setFirstName(firstName);
+            user.setLastName(lastName);
+            user.setUserName(userName);
+            user.setRegisteredAt(LocalDateTime.now());
 
-        return user;
+            return user;
+        } catch (Exception e) {
+            log.error("Ошибка при создании пользователя {}: {}", userName, e.getMessage());
+            throw new CustomException("Не удалось создать пользователя", e);
+        }
     }
 
     /**
@@ -83,14 +101,56 @@ public class UserService {
      * @return обновленный пользователь или null, если пользователь не найден
      */
     public User updateUserShelter(Long chatId, com.example.demo.entity.ShelterType shelterType) {
-        Optional<User> userOptional = findByChatId(chatId);
-        if (userOptional.isPresent()) {
-            User user = userOptional.get();
-            user.setChosenShelter(shelterType);
-            log.info("Обновлен приют пользователя {}: {}", chatId, shelterType);
-            return saveUser(user);
+        try {
+            Optional<User> userOptional = findByChatId(chatId);
+            if (userOptional.isPresent()) {
+                User user = userOptional.get();
+                user.setChosenShelter(shelterType);
+                log.info("Обновлен приют пользователя {}: {}", chatId, shelterType);
+                return saveUser(user);
+            }
+            throw new UserNotFoundException(chatId);
+        } catch (UserNotFoundException e) {
+            throw e; // Пробрасываем дальше специфичные исключения
+        } catch (Exception e) {
+            log.error("Ошибка при обновлении приюта для пользователя {}: {}", chatId, e.getMessage());
+            throw new CustomException("Не удалось обновить информацию о приюте", e);
         }
-        log.warn("Пользователь с chatId {} не найден для обновления приюта", chatId);
-        return null;
+    }
+
+    /**
+     * Проверяет существование пользователя
+     *
+     * @param chatId идентификатор чата пользователя
+     * @return true если пользователь существует
+     */
+    public boolean userExists(Long chatId) {
+        try {
+            return userRepository.existsById(chatId);
+        } catch (Exception e) {
+            log.error("Ошибка при проверке существования пользователя {}: {}", chatId, e.getMessage());
+            throw new CustomException("Не удалось проверить существование пользователя", e);
+        }
+    }
+
+    /**
+     * Удаляет пользователя по chatId
+     *
+     * @param chatId идентификатор чата пользователя
+     */
+    public void deleteUser(Long chatId) {
+        try {
+            if (userRepository.existsById(chatId)) {
+                userRepository.deleteById(chatId);
+                log.info("Пользователь {} удален", chatId);
+            } else {
+                throw new UserNotFoundException(chatId);
+            }
+        } catch (UserNotFoundException e) {
+            throw e;
+        } catch (Exception e) {
+            log.error("Ошибка при удалении пользователя {}: {}", chatId, e.getMessage());
+            throw new CustomException("Не удалось удалить пользователя", e);
+        }
     }
 }

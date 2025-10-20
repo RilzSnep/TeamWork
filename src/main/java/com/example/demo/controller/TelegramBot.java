@@ -1,7 +1,11 @@
 package com.example.demo.controller;
 
 import com.example.demo.config.BotConfig;
+import com.example.demo.entity.ShelterType;
 import com.example.demo.entity.User;
+import com.example.demo.exception.ShelterNotFoundException;
+import com.example.demo.exception.UserNotFoundException;
+import com.example.demo.service.AdoptionService;
 import com.example.demo.service.ShelterInfoService;
 import com.example.demo.service.UserService;
 import lombok.extern.slf4j.Slf4j;
@@ -30,20 +34,18 @@ public class TelegramBot extends TelegramLongPollingBot {
     private final BotConfig botConfig;
     private final UserService userService;
     private final ShelterInfoService shelterInfoService;
+    private final AdoptionService adoptionService;
 
     /**
      * Конструктор бота с внедрением зависимостей.
-     *
-     * @param botConfig конфигурация бота
-     * @param userService сервис для работы с пользователями
-     * @param shelterInfoService сервис для предоставления информации о приютах
      */
     @Autowired
-    public TelegramBot(BotConfig botConfig, UserService userService, ShelterInfoService shelterInfoService) {
-        super(botConfig.getToken());
+    public TelegramBot(BotConfig botConfig, UserService userService,
+                       ShelterInfoService shelterInfoService, AdoptionService adoptionService) {
         this.botConfig = botConfig;
         this.userService = userService;
         this.shelterInfoService = shelterInfoService;
+        this.adoptionService = adoptionService;
         log.info("Бот инициализирован: {}", botConfig.getName());
     }
 
@@ -52,65 +54,95 @@ public class TelegramBot extends TelegramLongPollingBot {
         return botConfig.getName();
     }
 
+    @Override
+    public String getBotToken() {
+        return botConfig.getToken();
+    }
+
     /**
      * Основной метод обработки входящих обновлений от Telegram.
-     * Обрабатывает текстовые сообщения и команды от пользователей.
-     *
-     * @param update объект обновления от Telegram API
      */
     @Override
     public void onUpdateReceived(Update update) {
-        if (update.hasMessage() && update.getMessage().hasText()) {
-            String messageText = update.getMessage().getText();
-            Long chatId = update.getMessage().getChatId();
-            String userName = update.getMessage().getChat().getUserName();
-            String firstName = update.getMessage().getChat().getFirstName();
-            String lastName = update.getMessage().getChat().getLastName();
+        try {
+            log.debug("Получено обновление: {}", update.getUpdateId());
 
-            log.info("Получено сообщение от {} ({} {}): {}", userName, firstName, lastName, messageText);
+            if (update.hasMessage() && update.getMessage().hasText()) {
+                String messageText = update.getMessage().getText();
+                Long chatId = update.getMessage().getChatId();
+                String userName = update.getMessage().getChat().getUserName();
+                String firstName = update.getMessage().getChat().getFirstName();
+                String lastName = update.getMessage().getChat().getLastName();
 
-            // Получаем информацию о пользователе и выбранном приюте
-            Optional<User> userOptional = userService.findByChatId(chatId);
-            com.example.demo.entity.ShelterType shelterType = userOptional
-                    .map(User::getChosenShelter)
-                    .orElse(null);
+                log.info("Получено сообщение от {} ({} {}): {}", userName, firstName, lastName, messageText);
 
-            // Обработка команд
-            switch (messageText) {
-                case "/start":
-                    handleStartCommand(chatId, firstName, lastName, userName);
-                    break;
-                case "Приют для кошек":
-                    handleShelterSelection(chatId, com.example.demo.entity.ShelterType.CAT);
-                    break;
-                case "Приют для собак":
-                    handleShelterSelection(chatId, com.example.demo.entity.ShelterType.DOG);
-                    break;
-                default:
-                    // Если приют уже выбран, обрабатываем команды главного меню
-                    if (shelterType != null) {
-                        if (isMainMenuCommand(messageText)) {
-                            handleMainMenuCommand(chatId, messageText, shelterType);
-                        } else if (isShelterInfoCommand(messageText)) {
-                            handleShelterInfoCommand(chatId, messageText, shelterType);
-                        } else {
-                            sendMessage(chatId, "Извините, я не понимаю эту команду. Используйте кнопки меню для навигации.");
-                        }
-                    } else {
-                        sendMessage(chatId, "Пожалуйста, начните с команды /start и выберите приют.");
-                    }
+                // Получаем информацию о пользователе и выбранном приюте
+                Optional<User> userOptional = userService.findByChatId(chatId);
+                ShelterType shelterType = userOptional
+                        .map(User::getChosenShelter)
+                        .orElse(null);
+
+                // Обработка команд с обработкой исключений
+                handleUserMessage(chatId, messageText, shelterType, firstName, lastName, userName);
+            }
+        } catch (Exception e) {
+            log.error("Критическая ошибка при обработке обновления: {}", e.getMessage(), e);
+            // Отправляем сообщение об ошибке пользователю, если возможно получить chatId
+            if (update.hasMessage()) {
+                sendSafeMessage(update.getMessage().getChatId(),
+                        "⚠️ Произошла непредвиденная ошибка. Пожалуйста, попробуйте позже.");
             }
         }
     }
 
     /**
+     * Безопасная обработка сообщения пользователя с обработкой исключений
+     */
+    private void handleUserMessage(Long chatId, String messageText, ShelterType shelterType,
+                                   String firstName, String lastName, String userName) {
+        try {
+            switch (messageText) {
+                case "/start":
+                    handleStartCommand(chatId, firstName, lastName, userName);
+                    break;
+                case "Приют для кошек":
+                    handleShelterSelection(chatId, ShelterType.CAT);
+                    break;
+                case "Приют для собак":
+                    handleShelterSelection(chatId, ShelterType.DOG);
+                    break;
+                default:
+                    if (shelterType != null) {
+                        if (isMainMenuCommand(messageText)) {
+                            handleMainMenuCommand(chatId, messageText, shelterType);
+                        } else if (isShelterInfoCommand(messageText)) {
+                            handleShelterInfoCommand(chatId, messageText, shelterType);
+                        } else if (isAdoptionCommand(messageText)) {
+                            handleAdoptionCommand(chatId, messageText, shelterType);
+                        } else {
+                            sendSafeMessage(chatId,
+                                    "Извините, я не понимаю эту команду. Используйте кнопки меню для навигации.");
+                        }
+                    } else {
+                        sendSafeMessage(chatId,
+                                "Пожалуйста, начните с команды /start и выберите приют.");
+                    }
+            }
+        } catch (UserNotFoundException e) {
+            log.warn("Ошибка пользователя: {}", e.getMessage());
+            sendSafeMessage(chatId, e.getMessage());
+        } catch (ShelterNotFoundException e) {
+            log.warn("Ошибка приюта: {}", e.getMessage());
+            sendSafeMessage(chatId, e.getMessage());
+        } catch (Exception e) {
+            log.error("Ошибка при обработке сообщения пользователя: {}", e.getMessage(), e);
+            sendSafeMessage(chatId,
+                    "⚠️ Произошла ошибка при обработке вашего запроса. Пожалуйста, попробуйте позже.");
+        }
+    }
+
+    /**
      * Обрабатывает команду /start - входную точку взаимодействия с ботом.
-     * Создает нового пользователя или приветствует существующего.
-     *
-     * @param chatId идентификатор чата
-     * @param firstName имя пользователя
-     * @param lastName фамилия пользователя
-     * @param userName username пользователя
      */
     private void handleStartCommand(Long chatId, String firstName, String lastName, String userName) {
         // Проверяем, есть ли пользователь в базе
@@ -140,12 +172,8 @@ public class TelegramBot extends TelegramLongPollingBot {
 
     /**
      * Обрабатывает выбор приюта пользователем.
-     * Сохраняет выбор приюта в базе данных и показывает главное меню.
-     *
-     * @param chatId идентификатор чата
-     * @param shelterType выбранный тип приюта
      */
-    private void handleShelterSelection(Long chatId, com.example.demo.entity.ShelterType shelterType) {
+    private void handleShelterSelection(Long chatId, ShelterType shelterType) {
         // Обновляем выбранный приют в базе данных
         User updatedUser = userService.updateUserShelter(chatId, shelterType);
 
@@ -160,19 +188,14 @@ public class TelegramBot extends TelegramLongPollingBot {
 
             sendMessageWithKeyboard(chatId, shelterInfo, createMainMenuKeyboard());
         } else {
-            sendMessage(chatId, "Произошла ошибка. Пожалуйста, начните снова с команды /start");
+            sendSafeMessage(chatId, "Произошла ошибка. Пожалуйста, начните снова с команды /start");
         }
     }
 
     /**
      * Обрабатывает запросы из главного меню (Этап 1).
-     * Направляет пользователя в соответствующий раздел.
-     *
-     * @param chatId идентификатор чата
-     * @param command команда из главного меню
-     * @param shelterType выбранный тип приюта
      */
-    private void handleMainMenuCommand(Long chatId, String command, com.example.demo.entity.ShelterType shelterType) {
+    private void handleMainMenuCommand(Long chatId, String command, ShelterType shelterType) {
         log.info("Обработка команды главного меню: {} для приюта {}", command, shelterType);
 
         switch (command) {
@@ -180,28 +203,23 @@ public class TelegramBot extends TelegramLongPollingBot {
                 sendShelterInfoMenu(chatId, shelterType);
                 break;
             case "Как взять животное из приюта":
-                sendMessage(chatId, "Раздел 'Как взять животное' в разработке. Скоро будет доступен!");
+                showAdoptionMenu(chatId, shelterType);
                 break;
             case "Прислать отчет о питомце":
-                sendMessage(chatId, "Раздел 'Отчет о питомце' в разработке. Скоро будет доступен!");
+                sendSafeMessage(chatId, "Раздел 'Отчет о питомце' в разработке. Скоро будет доступен!");
                 break;
             case "Позвать волонтера":
                 callVolunteer(chatId);
                 break;
             default:
-                sendMessage(chatId, "Пожалуйста, используйте кнопки меню для навигации.");
+                sendSafeMessage(chatId, "Пожалуйста, используйте кнопки меню для навигации.");
         }
     }
 
     /**
      * Обрабатывает запросы информации о приюте (подменю Этапа 1).
-     * Предоставляет конкретную информацию о выбранном приюте.
-     *
-     * @param chatId идентификатор чата
-     * @param command команда запроса информации
-     * @param shelterType выбранный тип приюта
      */
-    private void handleShelterInfoCommand(Long chatId, String command, com.example.demo.entity.ShelterType shelterType) {
+    private void handleShelterInfoCommand(Long chatId, String command, ShelterType shelterType) {
         log.info("Обработка запроса информации: {} для {}", command, shelterType);
 
         String response;
@@ -234,16 +252,66 @@ public class TelegramBot extends TelegramLongPollingBot {
         message.setText(response);
         message.setReplyMarkup(createShelterInfoKeyboard());
 
-        sendMessage(message);
+        sendSafeMessage(message);
+    }
+
+    /**
+     * Обрабатывает команды меню "Как взять животное из приюта"
+     */
+    private void handleAdoptionCommand(Long chatId, String command, ShelterType shelterType) {
+        log.info("Обработка команды усыновления: {} для приюта {}", command, shelterType);
+
+        String response;
+        switch (command) {
+            case "Правила знакомства":
+                response = adoptionService.getAdoptionInfo("meeting_rules");
+                break;
+            case "Необходимые документы":
+                response = adoptionService.getAdoptionInfo("documents");
+                break;
+            case "Рекомендации по транспортировке":
+                response = adoptionService.getAdoptionInfo("transportation");
+                break;
+            case "Обустройство дома для щенка/котенка":
+                response = adoptionService.getAdoptionInfo("home_preparation_young");
+                break;
+            case "Обустройство дома для взрослого животного":
+                response = adoptionService.getAdoptionInfo("home_preparation_adult");
+                break;
+            case "Обустройство для животного-инвалида":
+                response = adoptionService.getAdoptionInfo("home_preparation_disabled");
+                break;
+            case "Советы кинолога":
+                response = adoptionService.getShelterSpecificInfo("dog_behavior_tips", shelterType);
+                break;
+            case "Рекомендации кинологов":
+                response = adoptionService.getShelterSpecificInfo("dog_trainer_recommendations", shelterType);
+                break;
+            case "Причины отказа":
+                response = adoptionService.getShelterSpecificInfo("rejection_reasons", shelterType);
+                break;
+            case "Записать контакты":
+                response = handleContactRegistration(chatId);
+                break;
+            case "Назад в главное меню":
+                sendMessageWithKeyboard(chatId, "Возврат в главное меню:", createMainMenuKeyboard());
+                return;
+            default:
+                response = "Информация временно недоступна.";
+        }
+
+        SendMessage message = new SendMessage();
+        message.setChatId(chatId.toString());
+        message.setText(response);
+        message.setReplyMarkup(createAdoptionMenuKeyboard());
+
+        sendSafeMessage(message);
     }
 
     /**
      * Показывает меню информации о приюте.
-     *
-     * @param chatId идентификатор чата
-     * @param shelterType выбранный тип приюта
      */
-    private void sendShelterInfoMenu(Long chatId, com.example.demo.entity.ShelterType shelterType) {
+    private void sendShelterInfoMenu(Long chatId, ShelterType shelterType) {
         String menuText = """
                 ℹ️ Выберите, какую информацию хотите получить о приюте:
                 """;
@@ -253,10 +321,21 @@ public class TelegramBot extends TelegramLongPollingBot {
     }
 
     /**
+     * Показывает меню "Как взять животное из приюта"
+     */
+    private void showAdoptionMenu(Long chatId, ShelterType shelterType) {
+        String menuText = """
+                📋 Раздел "Как взять животное из приюта"
+                
+                Здесь вы найдете всю информацию о процессе усыновления:
+                """;
+
+        ReplyKeyboardMarkup keyboard = createAdoptionMenuKeyboard();
+        sendMessageWithKeyboard(chatId, menuText, keyboard);
+    }
+
+    /**
      * Обрабатывает вызов волонтера.
-     * Предоставляет контактную информацию для связи с волонтером.
-     *
-     * @param chatId идентификатор чата
      */
     private void callVolunteer(Long chatId) {
         String volunteerText = """
@@ -268,14 +347,29 @@ public class TelegramBot extends TelegramLongPollingBot {
                 
                 Опишите кратко ваш вопрос, чтобы волонтер мог лучше подготовиться.
                 """;
-        sendMessage(chatId, volunteerText);
+        sendSafeMessage(chatId, volunteerText);
+    }
+
+    /**
+     * Обрабатывает регистрацию контактов
+     */
+    private String handleContactRegistration(Long chatId) {
+        try {
+            // Здесь будет логика сохранения контактов
+            // Пока заглушка
+            return """
+                    📞 Ваши контактные данные записаны!
+                    
+                    Волонтер свяжется с вами в ближайшее время для обсуждения деталей.
+                    """;
+        } catch (Exception e) {
+            log.error("Ошибка при записи контактов: {}", e.getMessage());
+            return "❌ Не удалось записать контакты. Пожалуйста, попробуйте позже или позовите волонтера.";
+        }
     }
 
     /**
      * Проверяет, является ли команда командой главного меню.
-     *
-     * @param command текст команды
-     * @return true если команда относится к главному меню
      */
     private boolean isMainMenuCommand(String command) {
         return command.equals("Узнать информацию о приюте") ||
@@ -286,9 +380,6 @@ public class TelegramBot extends TelegramLongPollingBot {
 
     /**
      * Проверяет, является ли команда командой информации о приюте.
-     *
-     * @param command текст команды
-     * @return true если команда относится к меню информации о приюте
      */
     private boolean isShelterInfoCommand(String command) {
         return command.equals("Рассказать о приюте") ||
@@ -300,9 +391,24 @@ public class TelegramBot extends TelegramLongPollingBot {
     }
 
     /**
+     * Проверяет, является ли команда командой усыновления.
+     */
+    private boolean isAdoptionCommand(String command) {
+        return command.equals("Правила знакомства") ||
+                command.equals("Необходимые документы") ||
+                command.equals("Рекомендации по транспортировке") ||
+                command.equals("Обустройство дома для щенка/котенка") ||
+                command.equals("Обустройство дома для взрослого животного") ||
+                command.equals("Обустройство для животного-инвалида") ||
+                command.equals("Советы кинолога") ||
+                command.equals("Рекомендации кинологов") ||
+                command.equals("Причины отказа") ||
+                command.equals("Записать контакты") ||
+                command.equals("Назад в главное меню");
+    }
+
+    /**
      * Создает клавиатуру для выбора приюта.
-     *
-     * @return настроенная клавиатура выбора приюта
      */
     private ReplyKeyboardMarkup createShelterSelectionKeyboard() {
         ReplyKeyboardMarkup keyboardMarkup = new ReplyKeyboardMarkup();
@@ -323,8 +429,6 @@ public class TelegramBot extends TelegramLongPollingBot {
 
     /**
      * Создает основное меню после выбора приюта.
-     *
-     * @return настроенная клавиатура главного меню
      */
     private ReplyKeyboardMarkup createMainMenuKeyboard() {
         ReplyKeyboardMarkup keyboardMarkup = new ReplyKeyboardMarkup();
@@ -350,8 +454,6 @@ public class TelegramBot extends TelegramLongPollingBot {
 
     /**
      * Создает клавиатуру для меню информации о приюте.
-     *
-     * @return настроенная клавиатура меню информации
      */
     private ReplyKeyboardMarkup createShelterInfoKeyboard() {
         ReplyKeyboardMarkup keyboardMarkup = new ReplyKeyboardMarkup();
@@ -381,11 +483,51 @@ public class TelegramBot extends TelegramLongPollingBot {
     }
 
     /**
+     * Создает клавиатуру для меню усыновления
+     */
+    private ReplyKeyboardMarkup createAdoptionMenuKeyboard() {
+        ReplyKeyboardMarkup keyboardMarkup = new ReplyKeyboardMarkup();
+        keyboardMarkup.setResizeKeyboard(true);
+        keyboardMarkup.setOneTimeKeyboard(false);
+
+        List<KeyboardRow> keyboard = new ArrayList<>();
+
+        KeyboardRow row1 = new KeyboardRow();
+        row1.add("Правила знакомства");
+        row1.add("Необходимые документы");
+
+        KeyboardRow row2 = new KeyboardRow();
+        row2.add("Рекомендации по транспортировке");
+        row2.add("Обустройство дома для щенка/котенка");
+
+        KeyboardRow row3 = new KeyboardRow();
+        row3.add("Обустройство дома для взрослого животного");
+        row3.add("Обустройство для животного-инвалида");
+
+        KeyboardRow row4 = new KeyboardRow();
+        row4.add("Советы кинолога");
+        row4.add("Рекомендации кинологов");
+
+        KeyboardRow row5 = new KeyboardRow();
+        row5.add("Причины отказа");
+        row5.add("Записать контакты");
+
+        KeyboardRow row6 = new KeyboardRow();
+        row6.add("Назад в главное меню");
+
+        keyboard.add(row1);
+        keyboard.add(row2);
+        keyboard.add(row3);
+        keyboard.add(row4);
+        keyboard.add(row5);
+        keyboard.add(row6);
+
+        keyboardMarkup.setKeyboard(keyboard);
+        return keyboardMarkup;
+    }
+
+    /**
      * Отправляет сообщение с клавиатурой.
-     *
-     * @param chatId идентификатор чата
-     * @param text текст сообщения
-     * @param keyboard клавиатура для сообщения
      */
     private void sendMessageWithKeyboard(Long chatId, String text, ReplyKeyboardMarkup keyboard) {
         SendMessage message = new SendMessage();
@@ -393,30 +535,28 @@ public class TelegramBot extends TelegramLongPollingBot {
         message.setText(text);
         message.setReplyMarkup(keyboard);
 
-        sendMessage(message);
+        sendSafeMessage(message);
     }
 
     /**
-     * Отправляет простое текстовое сообщение.
-     *
-     * @param chatId идентификатор чата
-     * @param text текст сообщения
+     * Безопасная отправка сообщения с обработкой исключений Telegram API
      */
-    private void sendMessage(Long chatId, String text) {
-        SendMessage message = new SendMessage();
-        message.setChatId(chatId.toString());
-        message.setText(text);
-
-        sendMessage(message);
+    private void sendSafeMessage(Long chatId, String text) {
+        try {
+            SendMessage message = new SendMessage();
+            message.setChatId(chatId.toString());
+            message.setText(text);
+            execute(message);
+            log.debug("Сообщение отправлено в чат: {}", chatId);
+        } catch (TelegramApiException e) {
+            log.error("Ошибка при отправке сообщения в чат {}: {}", chatId, e.getMessage());
+        }
     }
 
     /**
-     * Общий метод для отправки сообщений.
-     * Обрабатывает исключения Telegram API.
-     *
-     * @param message объект сообщения для отправки
+     * Безопасная отправка сообщения (перегруженная версия)
      */
-    private void sendMessage(SendMessage message) {
+    private void sendSafeMessage(SendMessage message) {
         try {
             execute(message);
             log.debug("Сообщение отправлено в чат: {}", message.getChatId());
