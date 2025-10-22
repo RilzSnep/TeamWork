@@ -5,9 +5,7 @@ import com.example.demo.entity.ShelterType;
 import com.example.demo.entity.User;
 import com.example.demo.exception.ShelterNotFoundException;
 import com.example.demo.exception.UserNotFoundException;
-import com.example.demo.service.AdoptionService;
-import com.example.demo.service.ShelterInfoService;
-import com.example.demo.service.UserService;
+import com.example.demo.service.*;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
@@ -35,17 +33,22 @@ public class TelegramBot extends TelegramLongPollingBot {
     private final UserService userService;
     private final ShelterInfoService shelterInfoService;
     private final AdoptionService adoptionService;
+    private final AnimalService animalService;
+    private final AdoptionProcessService adoptionProcessService;
 
     /**
      * Конструктор бота с внедрением зависимостей.
      */
     @Autowired
     public TelegramBot(BotConfig botConfig, UserService userService,
-                       ShelterInfoService shelterInfoService, AdoptionService adoptionService) {
+                       ShelterInfoService shelterInfoService, AdoptionService adoptionService,
+                       AnimalService animalService, AdoptionProcessService adoptionProcessService) {
         this.botConfig = botConfig;
         this.userService = userService;
         this.shelterInfoService = shelterInfoService;
         this.adoptionService = adoptionService;
+        this.animalService = animalService;
+        this.adoptionProcessService = adoptionProcessService;
         log.info("Бот инициализирован: {}", botConfig.getName());
     }
 
@@ -263,6 +266,9 @@ public class TelegramBot extends TelegramLongPollingBot {
 
         String response;
         switch (command) {
+            case "Список животных":
+                response = animalService.getAvailableAnimalsList(shelterType);
+                break;
             case "Правила знакомства":
                 response = adoptionService.getAdoptionInfo("meeting_rules");
                 break;
@@ -394,7 +400,8 @@ public class TelegramBot extends TelegramLongPollingBot {
      * Проверяет, является ли команда командой усыновления.
      */
     private boolean isAdoptionCommand(String command) {
-        return command.equals("Правила знакомства") ||
+        return command.equals("Список животных") ||
+                command.equals("Правила знакомства") ||
                 command.equals("Необходимые документы") ||
                 command.equals("Рекомендации по транспортировке") ||
                 command.equals("Обустройство дома для щенка/котенка") ||
@@ -493,26 +500,27 @@ public class TelegramBot extends TelegramLongPollingBot {
         List<KeyboardRow> keyboard = new ArrayList<>();
 
         KeyboardRow row1 = new KeyboardRow();
+        row1.add("Список животных");
         row1.add("Правила знакомства");
-        row1.add("Необходимые документы");
 
         KeyboardRow row2 = new KeyboardRow();
+        row2.add("Необходимые документы");
         row2.add("Рекомендации по транспортировке");
-        row2.add("Обустройство дома для щенка/котенка");
 
         KeyboardRow row3 = new KeyboardRow();
+        row3.add("Обустройство дома для щенка/котенка");
         row3.add("Обустройство дома для взрослого животного");
-        row3.add("Обустройство для животного-инвалида");
 
         KeyboardRow row4 = new KeyboardRow();
+        row4.add("Обустройство для животного-инвалида");
         row4.add("Советы кинолога");
-        row4.add("Рекомендации кинологов");
 
         KeyboardRow row5 = new KeyboardRow();
+        row5.add("Рекомендации кинологов");
         row5.add("Причины отказа");
-        row5.add("Записать контакты");
 
         KeyboardRow row6 = new KeyboardRow();
+        row6.add("Записать контакты");
         row6.add("Назад в главное меню");
 
         keyboard.add(row1);
