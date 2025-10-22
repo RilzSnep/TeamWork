@@ -5,6 +5,7 @@ import com.example.demo.entity.ShelterType;
 import com.example.demo.entity.User;
 import com.example.demo.exception.ShelterNotFoundException;
 import com.example.demo.exception.UserNotFoundException;
+import com.example.demo.repository.UserRepository;
 import com.example.demo.service.*;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -16,9 +17,8 @@ import org.telegram.telegrambots.meta.api.objects.replykeyboard.ReplyKeyboardMar
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.KeyboardRow;
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Optional;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Основной класс Telegram бота для приюта животных.
@@ -35,6 +35,13 @@ public class TelegramBot extends TelegramLongPollingBot {
     private final AdoptionService adoptionService;
     private final AnimalService animalService;
     private final AdoptionProcessService adoptionProcessService;
+    private final ContactService contactService;
+    private final UserRepository userRepository;
+    private final ReportService reportService;
+
+    // Состояния пользователей для отслеживания процессов
+    private final Map<Long, String> userStates = new ConcurrentHashMap<>();
+    private final Map<Long, Map<String, String>> userTempData = new ConcurrentHashMap<>();
 
     /**
      * Конструктор бота с внедрением зависимостей.
@@ -42,13 +49,18 @@ public class TelegramBot extends TelegramLongPollingBot {
     @Autowired
     public TelegramBot(BotConfig botConfig, UserService userService,
                        ShelterInfoService shelterInfoService, AdoptionService adoptionService,
-                       AnimalService animalService, AdoptionProcessService adoptionProcessService) {
+                       AnimalService animalService, AdoptionProcessService adoptionProcessService,
+                       ContactService contactService, UserRepository userRepository,
+                       ReportService reportService) {
         this.botConfig = botConfig;
         this.userService = userService;
         this.shelterInfoService = shelterInfoService;
         this.adoptionService = adoptionService;
         this.animalService = animalService;
         this.adoptionProcessService = adoptionProcessService;
+        this.contactService = contactService;
+        this.userRepository = userRepository;
+        this.reportService = reportService;
         log.info("Бот инициализирован: {}", botConfig.getName());
     }
 
@@ -104,6 +116,17 @@ public class TelegramBot extends TelegramLongPollingBot {
     private void handleUserMessage(Long chatId, String messageText, ShelterType shelterType,
                                    String firstName, String lastName, String userName) {
         try {
+            // Проверяем, находится ли пользователь в процессе регистрации контактов или отчета
+            String userState = userStates.get(chatId);
+            if (userState != null && userState.startsWith("CONTACT_")) {
+                handleContactRegistrationState(chatId, messageText, userState);
+                return;
+            } else if (userState != null && userState.startsWith("REPORT_")) {
+                handleReportState(chatId, messageText, userState);
+                return;
+            }
+
+            // Обработка обычных команд
             switch (messageText) {
                 case "/start":
                     handleStartCommand(chatId, firstName, lastName, userName);
@@ -113,6 +136,9 @@ public class TelegramBot extends TelegramLongPollingBot {
                     break;
                 case "Приют для собак":
                     handleShelterSelection(chatId, ShelterType.DOG);
+                    break;
+                case "Отмена":
+                    handleCancel(chatId);
                     break;
                 default:
                     if (shelterType != null) {
@@ -209,7 +235,7 @@ public class TelegramBot extends TelegramLongPollingBot {
                 showAdoptionMenu(chatId, shelterType);
                 break;
             case "Прислать отчет о питомце":
-                sendSafeMessage(chatId, "Раздел 'Отчет о питомце' в разработке. Скоро будет доступен!");
+                startReportProcess(chatId);
                 break;
             case "Позвать волонтера":
                 callVolunteer(chatId);
@@ -240,8 +266,8 @@ public class TelegramBot extends TelegramLongPollingBot {
                 response = shelterInfoService.getSafetyRules(shelterType);
                 break;
             case "Записать контакты":
-                response = "Функция записи контактов в разработке. Позовите волонтера для связи.";
-                break;
+                startContactRegistration(chatId);
+                return;  // Выходим, так как отправляем отдельное сообщение
             case "Назад":
                 sendMessageWithKeyboard(chatId, "Возврат в главное меню:", createMainMenuKeyboard());
                 return;
@@ -297,9 +323,10 @@ public class TelegramBot extends TelegramLongPollingBot {
                 response = adoptionService.getShelterSpecificInfo("rejection_reasons", shelterType);
                 break;
             case "Записать контакты":
-                response = handleContactRegistration(chatId);
-                break;
+                startContactRegistration(chatId);
+                return;  // Выходим, так как отправляем отдельное сообщение
             case "Назад в главное меню":
+                userStates.remove(chatId);  // Сбрасываем состояние
                 sendMessageWithKeyboard(chatId, "Возврат в главное меню:", createMainMenuKeyboard());
                 return;
             default:
@@ -312,6 +339,400 @@ public class TelegramBot extends TelegramLongPollingBot {
         message.setReplyMarkup(createAdoptionMenuKeyboard());
 
         sendSafeMessage(message);
+    }
+
+    // ========== ФУНКЦИОНАЛ РЕГИСТРАЦИИ КОНТАКТОВ ==========
+
+    /**
+     * Начинает процесс регистрации контактов
+     */
+    private void startContactRegistration(Long chatId) {
+        String currentState = userStates.get(chatId);
+
+        if (currentState == null) {
+            // Начинаем процесс регистрации
+            userStates.put(chatId, "CONTACT_AWAITING_PHONE");
+
+            String instruction = """
+                    📝 Запись контактных данных
+                    
+                    Для связи с вами нам необходимы ваши контактные данные.
+                    
+                    📱 Пожалуйста, введите ваш номер телефона в формате:
+                    +7-9**-***-**-**
+                    
+                    Например: +7-912-345-67-89
+                    
+                    ❗ Важно: соблюдайте указанный формат!
+                    """;
+
+            // Создаем клавиатуру с кнопкой отмены
+            ReplyKeyboardMarkup keyboard = createCancelKeyboard();
+            sendMessageWithKeyboard(chatId, instruction, keyboard);
+        } else {
+            // Пользователь уже в процессе регистрации
+            sendSafeMessage(chatId, "⚠️ Вы уже находитесь в процессе записи контактов. Пожалуйста, завершите его или отмените.");
+        }
+    }
+
+    /**
+     * Обрабатывает состояния регистрации контактов
+     */
+    private void handleContactRegistrationState(Long chatId, String messageText, String userState) {
+        switch (userState) {
+            case "CONTACT_AWAITING_PHONE":
+                handlePhoneInput(chatId, messageText);
+                break;
+            case "CONTACT_AWAITING_EMAIL":
+                handleEmailInput(chatId, messageText);
+                break;
+            case "CONTACT_AWAITING_ADDRESS":
+                handleAddressInput(chatId, messageText);
+                break;
+            default:
+                userStates.remove(chatId);
+                sendSafeMessage(chatId, "⚠️ Произошла ошибка. Пожалуйста, начните заново.");
+        }
+    }
+
+    /**
+     * Обработка ввода телефона
+     */
+    private void handlePhoneInput(Long chatId, String phoneNumber) {
+        if (phoneNumber.equals("Отмена")) {
+            handleCancel(chatId);
+            return;
+        }
+
+        if (contactService.isValidPhoneNumber(phoneNumber)) {
+            // Сохраняем телефон и запрашиваем email
+            contactService.saveUserContacts(chatId, phoneNumber, null, null);
+            userStates.put(chatId, "CONTACT_AWAITING_EMAIL");
+
+            String message = """
+                    ✅ Номер телефона сохранен!
+                    
+                    📧 Теперь введите ваш email (необязательно):
+                    
+                    Или нажмите "Пропустить", чтобы перейти к следующему шагу.
+                    """;
+
+            ReplyKeyboardMarkup keyboard = createSkipCancelKeyboard();
+            sendMessageWithKeyboard(chatId, message, keyboard);
+
+        } else {
+            String errorMessage = """
+                    ❌ Неверный формат номера телефона!
+                    
+                    📱 Пожалуйста, введите номер в формате:
+                    +7-9**-***-**-**
+                    
+                    Например: +7-912-345-67-89
+                    
+                    Попробуйте еще раз:
+                    """;
+            sendSafeMessage(chatId, errorMessage);
+        }
+    }
+
+    /**
+     * Обработка ввода email
+     */
+    private void handleEmailInput(Long chatId, String email) {
+        if (email.equals("Отмена")) {
+            handleCancel(chatId);
+            return;
+        }
+
+        if (email.equals("Пропустить")) {
+            // Пропускаем email и переходим к адресу
+            userStates.put(chatId, "CONTACT_AWAITING_ADDRESS");
+
+            String message = """
+                    📧 Email пропущен.
+                    
+                    🏠 Теперь введите ваш адрес (необязательно):
+                    
+                    Или нажмите "Завершить", чтобы сохранить контакты.
+                    """;
+
+            ReplyKeyboardMarkup keyboard = createFinishCancelKeyboard();
+            sendMessageWithKeyboard(chatId, message, keyboard);
+            return;
+        }
+
+        if (contactService.isValidEmail(email)) {
+            // Сохраняем email и переходим к адресу
+            String currentPhone = userRepository.findById(chatId)
+                    .map(User::getPhoneNumber)
+                    .orElse(null);
+            contactService.saveUserContacts(chatId, currentPhone, email, null);
+            userStates.put(chatId, "CONTACT_AWAITING_ADDRESS");
+
+            String message = """
+                    ✅ Email сохранен!
+                    
+                    🏠 Теперь введите ваш адрес (необязательно):
+                    
+                    Или нажмите "Завершить", чтобы сохранить контакты.
+                    """;
+
+            ReplyKeyboardMarkup keyboard = createFinishCancelKeyboard();
+            sendMessageWithKeyboard(chatId, message, keyboard);
+
+        } else {
+            String errorMessage = """
+                    ❌ Неверный формат email!
+                    
+                    📧 Пожалуйста, введите корректный email:
+                    
+                    Например: example@mail.ru
+                    
+                    Или нажмите "Пропустить", чтобы перейти к следующему шагу.
+                    """;
+            sendSafeMessage(chatId, errorMessage);
+        }
+    }
+
+    /**
+     * Обработка ввода адреса
+     */
+    private void handleAddressInput(Long chatId, String address) {
+        if (address.equals("Отмена")) {
+            handleCancel(chatId);
+            return;
+        }
+
+        if (address.equals("Завершить")) {
+            // Завершаем процесс регистрации
+            completeContactRegistration(chatId);
+            return;
+        }
+
+        // Сохраняем адрес и завершаем процесс
+        String currentPhone = userRepository.findById(chatId)
+                .map(User::getPhoneNumber)
+                .orElse(null);
+        String currentEmail = userRepository.findById(chatId)
+                .map(User::getEmail)
+                .orElse(null);
+
+        if (contactService.saveUserContacts(chatId, currentPhone, currentEmail, address)) {
+            completeContactRegistration(chatId);
+        } else {
+            sendSafeMessage(chatId, "❌ Произошла ошибка при сохранении адреса. Попробуйте еще раз.");
+        }
+    }
+
+    /**
+     * Завершение процесса регистрации контактов
+     */
+    private void completeContactRegistration(Long chatId) {
+        userStates.remove(chatId);
+
+        String contactsInfo = contactService.getUserContactsInfo(chatId);
+        String successMessage = """
+                ✅ Ваши контактные данные успешно сохранены!
+                
+                """ + contactsInfo + """
+                
+                📞 Волонтер свяжется с вами в ближайшее время для обсуждения деталей.
+                
+                Спасибо, что обратились в наш приют! 🐾
+                """;
+
+        // Возвращаем в соответствующее меню
+        Optional<User> userOpt = userService.findByChatId(chatId);
+        ShelterType shelterType = userOpt.map(User::getChosenShelter).orElse(null);
+
+        if (shelterType != null) {
+            sendMessageWithKeyboard(chatId, successMessage, createMainMenuKeyboard());
+        } else {
+            sendMessageWithKeyboard(chatId, successMessage, createShelterSelectionKeyboard());
+        }
+    }
+
+    // ========== ФУНКЦИОНАЛ ОТЧЕТОВ О ПИТОМЦАХ ==========
+
+    /**
+     * Начинает процесс отправки отчета о питомце
+     */
+    private void startReportProcess(Long chatId) {
+        // Проверяем, есть ли у пользователя активные усыновления
+        List<Object> adoptions = Collections.singletonList(adoptionProcessService.getUserAdoptions(chatId));
+
+        if (adoptions.isEmpty()) {
+            sendSafeMessage(chatId, """
+                    ❌ У вас нет активных усыновлений для отправки отчетов.
+                    
+                    Если вы считаете, что это ошибка, пожалуйста, свяжитесь с волонтером.
+                    """);
+            return;
+        }
+
+        // Начинаем процесс отправки отчета
+        userStates.put(chatId, "REPORT_AWAITING_DIET");
+        userTempData.put(chatId, new ConcurrentHashMap<>());
+
+        String instruction = """
+                📊 Ежедневный отчет о питомце
+                
+                Пожалуйста, заполните информацию о вашем питомце за сегодня.
+                
+                🍽️ Шаг 1: Опишите рацион питания питомца:
+                - Что и сколько кушал питомец сегодня?
+                - Были ли какие-то особенности в питании?
+                """;
+
+        ReplyKeyboardMarkup keyboard = createCancelKeyboard();
+        sendMessageWithKeyboard(chatId, instruction, keyboard);
+    }
+
+    /**
+     * Обрабатывает состояния отправки отчета
+     */
+    private void handleReportState(Long chatId, String messageText, String userState) {
+        if (messageText.equals("Отмена")) {
+            handleCancel(chatId);
+            return;
+        }
+
+        switch (userState) {
+            case "REPORT_AWAITING_DIET":
+                handleDietInput(chatId, messageText);
+                break;
+            case "REPORT_AWAITING_HEALTH":
+                handleHealthInput(chatId, messageText);
+                break;
+            case "REPORT_AWAITING_BEHAVIOR":
+                handleBehaviorInput(chatId, messageText);
+                break;
+            case "REPORT_AWAITING_PHOTO":
+                handlePhotoInput(chatId, messageText);
+                break;
+            default:
+                userStates.remove(chatId);
+                userTempData.remove(chatId);
+                sendSafeMessage(chatId, "⚠️ Произошла ошибка. Пожалуйста, начните заново.");
+        }
+    }
+
+    private void handleDietInput(Long chatId, String diet) {
+        userTempData.get(chatId).put("diet", diet);
+        userStates.put(chatId, "REPORT_AWAITING_HEALTH");
+
+        String message = """
+                ✅ Рацион питания сохранен!
+                
+                🏥 Шаг 2: Опишите общее самочувствие и привыкание к новому месту:
+                - Как питомец себя чувствует?
+                - Есть ли изменения в состоянии здоровья?
+                - Как проходит адаптация?
+                """;
+
+        sendSafeMessage(chatId, message);
+    }
+
+    private void handleHealthInput(Long chatId, String health) {
+        userTempData.get(chatId).put("health", health);
+        userStates.put(chatId, "REPORT_AWAITING_BEHAVIOR");
+
+        String message = """
+                ✅ Состояние здоровья сохранено!
+                
+                🐕 Шаг 3: Опишите изменения в поведении:
+                - Отказ от старых привычек?
+                - Приобретение новых привычек?
+                - Изменения в поведении с членами семьи?
+                """;
+
+        sendSafeMessage(chatId, message);
+    }
+
+    private void handleBehaviorInput(Long chatId, String behavior) {
+        userTempData.get(chatId).put("behavior", behavior);
+        userStates.put(chatId, "REPORT_AWAITING_PHOTO");
+
+        String message = """
+                ✅ Изменения в поведении сохранены!
+                
+                📷 Шаг 4: Пришлите фото питомца:
+                - Сделайте четкое фото питомца
+                - Желательно, чтобы питомец был в кадре полностью
+                - Можно отправить несколько фото
+                
+                Или нажмите "Пропустить фото", если не можете отправить фото сейчас.
+                """;
+
+        ReplyKeyboardMarkup keyboard = createSkipPhotoKeyboard();
+        sendMessageWithKeyboard(chatId, message, keyboard);
+    }
+
+    private void handlePhotoInput(Long chatId, String messageText) {
+        if (messageText.equals("Пропустить фото")) {
+            userTempData.get(chatId).put("photo", "Фото не приложено");
+        } else {
+            userTempData.get(chatId).put("photo", "Фото приложено (в разработке)");
+        }
+
+        completeReportProcess(chatId);
+    }
+
+    private void completeReportProcess(Long chatId) {
+        Map<String, String> reportData = userTempData.get(chatId);
+
+        // Сохраняем отчет в базу данных
+        boolean success = reportService.submitDailyReport(
+                chatId, // В реальной реализации нужно передать adoptionId
+                reportData.get("diet"),
+                reportData.get("health"),
+                reportData.get("behavior"),
+                reportData.get("photo")
+        );
+
+        userStates.remove(chatId);
+        userTempData.remove(chatId);
+
+        if (success) {
+            String successMessage = """
+                    ✅ Ежедневный отчет успешно отправлен!
+                    
+                    Благодарим вас за ответственность и заботу о питомце! 🐾
+                    
+                    Волонтеры проверят ваш отчет и при необходимости свяжутся с вами.
+                    
+                    Не забывайте отправлять отчет ежедневно до 21:00.
+                    """;
+            sendMessageWithKeyboard(chatId, successMessage, createMainMenuKeyboard());
+        } else {
+            String errorMessage = """
+                    ❌ Не удалось сохранить отчет.
+                    
+                    Пожалуйста, попробуйте еще раз или свяжитесь с волонтером.
+                    """;
+            sendMessageWithKeyboard(chatId, errorMessage, createMainMenuKeyboard());
+        }
+    }
+
+    // ========== ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ ==========
+
+    /**
+     * Обработка отмены
+     */
+    private void handleCancel(Long chatId) {
+        userStates.remove(chatId);
+        userTempData.remove(chatId);
+        sendSafeMessage(chatId, "❌ Операция отменена.");
+
+        // Возвращаем в соответствующее меню
+        Optional<User> userOpt = userService.findByChatId(chatId);
+        ShelterType shelterType = userOpt.map(User::getChosenShelter).orElse(null);
+
+        if (shelterType != null) {
+            sendMessageWithKeyboard(chatId, "Возврат в главное меню:", createMainMenuKeyboard());
+        } else {
+            sendMessageWithKeyboard(chatId, "Пожалуйста, выберите приют:", createShelterSelectionKeyboard());
+        }
     }
 
     /**
@@ -357,24 +778,6 @@ public class TelegramBot extends TelegramLongPollingBot {
     }
 
     /**
-     * Обрабатывает регистрацию контактов
-     */
-    private String handleContactRegistration(Long chatId) {
-        try {
-            // Здесь будет логика сохранения контактов
-            // Пока заглушка
-            return """
-                    📞 Ваши контактные данные записаны!
-                    
-                    Волонтер свяжется с вами в ближайшее время для обсуждения деталей.
-                    """;
-        } catch (Exception e) {
-            log.error("Ошибка при записи контактов: {}", e.getMessage());
-            return "❌ Не удалось записать контакты. Пожалуйста, попробуйте позже или позовите волонтера.";
-        }
-    }
-
-    /**
      * Проверяет, является ли команда командой главного меню.
      */
     private boolean isMainMenuCommand(String command) {
@@ -413,6 +816,8 @@ public class TelegramBot extends TelegramLongPollingBot {
                 command.equals("Записать контакты") ||
                 command.equals("Назад в главное меню");
     }
+
+    // ========== МЕТОДЫ СОЗДАНИЯ КЛАВИАТУР ==========
 
     /**
      * Создает клавиатуру для выбора приюта.
@@ -531,6 +936,83 @@ public class TelegramBot extends TelegramLongPollingBot {
         keyboard.add(row6);
 
         keyboardMarkup.setKeyboard(keyboard);
+        return keyboardMarkup;
+    }
+
+    /**
+     * Создает клавиатуру для отмены
+     */
+    private ReplyKeyboardMarkup createCancelKeyboard() {
+        ReplyKeyboardMarkup keyboardMarkup = new ReplyKeyboardMarkup();
+        keyboardMarkup.setResizeKeyboard(true);
+        keyboardMarkup.setOneTimeKeyboard(true);
+
+        List<KeyboardRow> keyboard = new ArrayList<>();
+        KeyboardRow row = new KeyboardRow();
+        row.add("Отмена");
+        keyboard.add(row);
+        keyboardMarkup.setKeyboard(keyboard);
+
+        return keyboardMarkup;
+    }
+
+    /**
+     * Создает клавиатуру с пропуском и отменой
+     */
+    private ReplyKeyboardMarkup createSkipCancelKeyboard() {
+        ReplyKeyboardMarkup keyboardMarkup = new ReplyKeyboardMarkup();
+        keyboardMarkup.setResizeKeyboard(true);
+        keyboardMarkup.setOneTimeKeyboard(true);
+
+        List<KeyboardRow> keyboard = new ArrayList<>();
+        KeyboardRow row1 = new KeyboardRow();
+        row1.add("Пропустить");
+        KeyboardRow row2 = new KeyboardRow();
+        row2.add("Отмена");
+        keyboard.add(row1);
+        keyboard.add(row2);
+        keyboardMarkup.setKeyboard(keyboard);
+
+        return keyboardMarkup;
+    }
+
+    /**
+     * Создает клавиатуру с завершением и отменой
+     */
+    private ReplyKeyboardMarkup createFinishCancelKeyboard() {
+        ReplyKeyboardMarkup keyboardMarkup = new ReplyKeyboardMarkup();
+        keyboardMarkup.setResizeKeyboard(true);
+        keyboardMarkup.setOneTimeKeyboard(true);
+
+        List<KeyboardRow> keyboard = new ArrayList<>();
+        KeyboardRow row1 = new KeyboardRow();
+        row1.add("Завершить");
+        KeyboardRow row2 = new KeyboardRow();
+        row2.add("Отмена");
+        keyboard.add(row1);
+        keyboard.add(row2);
+        keyboardMarkup.setKeyboard(keyboard);
+
+        return keyboardMarkup;
+    }
+
+    /**
+     * Создает клавиатуру для пропуска фото
+     */
+    private ReplyKeyboardMarkup createSkipPhotoKeyboard() {
+        ReplyKeyboardMarkup keyboardMarkup = new ReplyKeyboardMarkup();
+        keyboardMarkup.setResizeKeyboard(true);
+        keyboardMarkup.setOneTimeKeyboard(true);
+
+        List<KeyboardRow> keyboard = new ArrayList<>();
+        KeyboardRow row1 = new KeyboardRow();
+        row1.add("Пропустить фото");
+        KeyboardRow row2 = new KeyboardRow();
+        row2.add("Отмена");
+        keyboard.add(row1);
+        keyboard.add(row2);
+        keyboardMarkup.setKeyboard(keyboard);
+
         return keyboardMarkup;
     }
 

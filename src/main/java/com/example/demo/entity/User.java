@@ -8,34 +8,22 @@ import java.time.LocalDateTime;
  * Сущность для представления пользователя телеграм-бота.
  * Содержит основную информацию о пользователе и его выборе приюта.
  */
+// User.java - добавляем поля для контактов
 @Entity
 @Table(name = "users")
 @Data
 public class User {
 
-    /**
-     * Уникальный идентификатор чата с пользователем.
-     * Используется как первичный ключ.
-     */
     @Id
     @Column(name = "chat_id")
     private Long chatId;
 
-    /**
-     * Имя пользователя в Telegram.
-     */
     @Column(name = "first_name")
     private String firstName;
 
-    /**
-     * Фамилия пользователя в Telegram.
-     */
     @Column(name = "last_name")
     private String lastName;
 
-    /**
-     * Username пользователя в Telegram.
-     */
     @Column(name = "user_name")
     private String userName;
 
@@ -47,16 +35,27 @@ public class User {
     private String phoneNumber;
 
     /**
-     * Выбранный пользователем приют.
-     * Определяет, информацию о каком приюте получать пользователь.
+     * Email пользователя.
      */
+    @Column(name = "email")
+    private String email;
+
+    /**
+     * Адрес пользователя.
+     */
+    @Column(name = "address")
+    private String address;
+
     @Enumerated(EnumType.STRING)
     @Column(name = "chosen_shelter")
     private ShelterType chosenShelter;
 
-    /**
-     * Дата и время регистрации пользователя в боте.
-     */
     @Column(name = "registered_at")
     private LocalDateTime registeredAt;
+
+    /**
+     * Дата и время последнего обновления контактов
+     */
+    @Column(name = "contacts_updated_at")
+    private LocalDateTime contactsUpdatedAt;
 }

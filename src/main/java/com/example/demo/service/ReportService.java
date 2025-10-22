@@ -1,8 +1,6 @@
-// ReportService.java
 package com.example.demo.service;
 
 import com.example.demo.entity.DailyReport;
-import com.example.demo.entity.Adoption;
 import com.example.demo.repository.DailyReportRepository;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -21,11 +19,9 @@ public class ReportService {
         this.reportRepository = reportRepository;
     }
 
-    public boolean submitDailyReport(Long adoptionId, String diet, String healthCondition,
+    public boolean submitDailyReport(Long chatId, String diet, String healthCondition,
                                      String behaviorChanges, String photoPath) {
         try {
-            // Здесь должна быть логика получения Adoption по ID
-            // Пока заглушка для демонстрации
             DailyReport report = new DailyReport();
             report.setReportDate(LocalDateTime.now());
             report.setDiet(diet);
@@ -34,12 +30,15 @@ public class ReportService {
             report.setPhotoPath(photoPath);
             report.setIsReviewed(false);
 
+            // TODO: В реальной реализации нужно связать с adoption
+            // report.setAdoption(adoption);
+
             reportRepository.save(report);
-            log.info("Отчет сохранен для усыновления: {}", adoptionId);
+            log.info("Отчет сохранен для пользователя: {}", chatId);
             return true;
 
         } catch (Exception e) {
-            log.error("Ошибка при сохранении отчета: {}", e.getMessage());
+            log.error("Ошибка при сохранении отчета для пользователя {}: {}", chatId, e.getMessage());
             return false;
         }
     }
